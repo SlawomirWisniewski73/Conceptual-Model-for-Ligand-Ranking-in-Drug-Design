@@ -141,3 +141,145 @@ print(f"Sukces! Plik '{output_filename}' został wygenerowany.")
 print(f"Zawiera {len(df_final)} wierszy.")
 print("Pierwsze 5 wierszy:")
 print(df_final.head())
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+print("\nGenerowanie wykresów...")
+
+# --- 7. Figure 1: Heatmap (Parameter Sensitivity) ---
+# Analiza dla najlepszego liganda (Rank 1)
+best_idx = metrics_aligned[metrics_aligned['Rank'] == 1].index[0]
+ratios, _ = solver.normalize_library(ligand_matrix)
+best_ligand_ratios = ratios[best_idx:best_idx+1]
+
+# Siatka parametrów
+alphas = np.linspace(0.1, 5.0, 20)
+ks = np.logspace(-1, 1, 20)
+dist_grid = np.zeros((len(alphas), len(ks)))
+
+# Prekalkulacja stałej części energii
+diff = best_ligand_ratios - 1.0
+A_base = np.sum(weights * (diff**2))
+
+for i, a in enumerate(alphas):
+    for j, k_val in enumerate(ks):
+        # Parametry fizyczne dla danego punktu siatki
+        p = PhysicsParams(k=k_val)
+        zeta = p.damping_ratio()
+        wn = np.sqrt(k_val/1.0)
+        t = 10.0
+        
+        # Obliczenie f(t) w punkcie t=10
+        if zeta < 1.0:
+            sigma = zeta * wn
+            wd = wn * np.sqrt(1 - zeta**2)
+            ft = np.exp(-sigma * t) * (np.cos(wd * t) + (sigma/wd) * np.sin(wd * t))
+        elif np.isclose(zeta, 1.0):
+            ft = (1 + wn * t) * np.exp(-wn * t)
+        else:
+            term = np.sqrt(zeta**2 - 1.0)
+            r1 = -wn * (zeta - term)
+            r2 = -wn * (zeta + term)
+            ft = (r2 * np.exp(r1 * t) - r1 * np.exp(r2 * t)) / (r2 - r1)
+        
+        f_safe = np.sqrt(max(ft**2, 0))
+        dist_grid[i, j] = a * np.sqrt(A_base) * f_safe
+
+plt.figure(figsize=(8, 6))
+sns.heatmap(dist_grid, xticklabels=np.round(ks, 1), yticklabels=np.round(alphas, 1), cmap='viridis')
+plt.xlabel('Stiffness k')
+plt.ylabel('Guidance Alpha')
+plt.title(f'Grid Search: Final Distance (Ligand {df_data.iloc[best_idx]["Ligand_ID"]})')
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.savefig('fig1_heatmap.png', dpi=300)
+plt.close()
+print(" - Wygenerowano fig1_heatmap.png")
+
+# --- 8. Figure 2: Scatter Plot (Top 5% Analysis) ---
+# Definicja Top 5%
+n_top = int(N_LIGANDS * 0.05)
+metrics_sorted = metrics.sort_values("Final_Distance")
+top_5_mask = metrics_sorted.index[:n_top]
+
+# Pobranie danych do wykresu
+mrd_sorted = df_final.loc[metrics_sorted['Original_Index'], 'MRD'].values
+dist_sorted = metrics_sorted['Final_Distance'].values
+
+plt.figure(figsize=(8, 6))
+# Rysuj wszystkie (szare)
+plt.scatter(mrd_sorted[n_top:], dist_sorted[n_top:], alpha=0.3, c='gray', s=10, label='Bottom 95%')
+# Rysuj Top 5% (czerwone)
+plt.scatter(mrd_sorted[:n_top], dist_sorted[:n_top], alpha=0.8, c='red', s=15, label='Top 5% (Lead Opt.)')
+
+# Linia trendu dla całości
+m, b = np.polyfit(mrd_sorted, dist_sorted, 1)
+plt.plot(mrd_sorted, m*mrd_sorted + b, 'k--', lw=1, label=f'Global Trend')
+
+plt.xlabel('Mean Ratio Deviation (MRD)')
+plt.ylabel('Model Final Distance')
+plt.title(f'Lead Optimization Divergence (N={N_LIGANDS})')
+plt.legend()
+plt.tight_layout()
+plt.savefig('top5_analysis.png', dpi=300)
+plt.close()
+print(" - Wygenerowano top5_analysis.png")
+
+# --- 9. Figure 3: Histogram ---
+plt.figure(figsize=(8, 6))
+plt.hist(df_final['Final_Distance'], bins=40, color='green', alpha=0.7, edgecolor='black')
+plt.xlabel('Final Weighted Distance')
+plt.ylabel('Frequency')
+plt.title('Distribution of Scores')
+plt.tight_layout()
+plt.savefig('fig3_hist.png', dpi=300)
+plt.close()
+print(" - Wygenerowano fig3_hist.png")
+
+# --- 10. Figure 4: Weight Sensitivity ---
+# Wybór reprezentatywnych ligandów (Top 1, Rank 2500, 5000, 7500)
+indices_to_test = [0, 2499, 4999, 7499]
+sel_orig_indices = metrics_sorted.iloc[indices_to_test]['Original_Index'].values
+sel_ligand_ids = df_data.iloc[sel_orig_indices]['Ligand_ID'].values
+
+w_schemes = {
+    'Default': np.array([1.0, 1.0, 0.5, 0.3, 0.5, 0.4]),
+    'Equal': np.ones(6),
+    'Potency': np.array([2.0, 1.0, 0.5, 0.3, 0.5, 0.4])
+}
+
+res_sensitivity = []
+sub_matrix = ligand_matrix[sel_orig_indices]
+
+# Pętla po schematach wag
+for name, w in w_schemes.items():
+    s_temp = VectorizedLigandSolver(target_vector, w)
+    norm_temp, _ = s_temp.normalize_library(sub_matrix)
+    diff_temp = norm_temp - 1.0
+    A_temp = np.sum(w * diff_temp**2, axis=1) # alpha=1
+    
+    # Obliczenie f(t) dla domyślnych parametrów (k=1.2, m=1, c=0.8)
+    # (Używamy wartości z pętli głównej lub przeliczamy raz jeszcze dla pewności)
+    wn = np.sqrt(1.2); z = 0.8/(2*wn); sigma=z*wn; wd=wn*np.sqrt(1-z**2)
+    ft_val = np.exp(-sigma*10)*(np.cos(wd*10)+(sigma/wd)*np.sin(wd*10))
+    ft_safe = np.sqrt(max(ft_val**2, 0))
+    
+    dists = np.sqrt(A_temp) * ft_safe
+    
+    for i, dist in enumerate(dists):
+        res_sensitivity.append({
+            'Ligand': sel_ligand_ids[i],
+            'Scheme': name,
+            'Distance': dist
+        })
+
+df_sens = pd.DataFrame(res_sensitivity)
+
+plt.figure(figsize=(10, 6))
+sns.barplot(data=df_sens, x='Ligand', y='Distance', hue='Scheme')
+plt.title('Sensitivity to Weight Schemes')
+plt.tight_layout()
+plt.savefig('fig4_sensitivity.png', dpi=300)
+plt.close()
+print(" - Wygenerowano fig4_sensitivity.png")
+print("\nGotowe! Wszystkie pliki zostały utworzone.")
